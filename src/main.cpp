@@ -5,12 +5,12 @@
 
 // ---------- ETHERNET AND MQTT CONNECTION ----------
 #define ETHERNET_MAC        0xDE, 0xED, 0xBA, 0xFE, 0xFE, 0xED  // MAC
-#define ETHERNET_IP      	  192, 168, 1, 225 		                // Shield IP
+#define ETHERNET_IP         192, 168, 1, 225                    // Shield IP
 #define MQTT_SERVER         "192.168.1.250"                     // MQTT server IP
 #define MQTT_PORT           1883                                // MQTT port
 #define MQTT_USERNAME       "fran"                              // MQTT server username
 #define MQTT_PASSWORD       "raspfran"                          // MQTT server password
-#define CLIENT_ID           "Arduino_LAB"		                    // MQTT client ID
+#define CLIENT_ID           "Arduino_LAB"                       // MQTT client ID
 
 // ---------- MQTT TOPICS ----------
 #define PUB_PARAM           "lab/param"
@@ -32,11 +32,11 @@ byte mac[]  = {ETHERNET_MAC};
 IPAddress ip(ETHERNET_IP);
 EthernetClient ethClient;
 PubSubClient client(ethClient);
-//long lastMsg = 0;
-//char msg[50];
 
-// ----- OTRAS VARIABLES -----
-int cycles = 24999;   // For 100ms prescaler 64
+
+// ----- CONTROL VARIABLES -----
+int sample_time = 100;   
+bool RUN_signal = 0;
 
 // --------- INTERRUPTS VARIABLES ----------
 volatile bool alarm_flag = false;
@@ -54,31 +54,37 @@ volatile int analog_4 = 0;
 // ********************************************************************
 void ConnectEthernet();
 void ConnectMQTT();
-void UpdateInfo();
+void UpdateInfo(int, bool);
 
 
 // ********************************************************************
 //                      CALLBACKS
 // ********************************************************************
 void onReceiveMQTT(char* topic, byte* payload, unsigned int length) {
-
+  // --------- LOCAL VARIABLES ----------
+  // MQTT variables
   StaticJsonDocument<100> doc;
   deserializeJson(doc, payload, length);
-
   JsonObject obj = doc.as<JsonObject>();
+
+  //Info variables
+  
 
   if (obj.containsKey("RUN")) {
     bool RUN = doc["RUN"];
-    digitalWrite(RUN_PIN, RUN);   // Stop and start frequency drive
+    RUN_signal = RUN;
+    digitalWrite(RUN_PIN, RUN_signal);   // Stop and start frequency drive
   }
 
   if (obj.containsKey("sample_time")) {
     // ---------- CHANGING SAMPLE TIME ---------
-    int sample_time = doc["sample_time"];   // Get sample time from JSON
+    sample_time = doc["sample_time"];       // Get sample time from JSON
     noInterrupts();                         // Deactivate interrupt
     OCR1A = 250 * sample_time - 1;          // Change register value: [(16*10^6) / (frequency*prescaler)] - 1 (must be <65536)
     interrupts();                           // Enable interrupts
   }
+
+  UpdateInfo(sample_time, RUN_signal);                     // Update information in server
 }
 
 
@@ -94,7 +100,7 @@ void setup() {
   TCCR1A = 0;                             // Set entire TCCR1A register to 0
   TCCR1B = 0;                             // Same for TCCR1B
   TCNT1  = 0;                             // Initialize counter value to 0
-  OCR1A = 24999;                          // 100ms -> ((16*10^6) / (frequency*prescaler)) - 1 (must be <65536)
+  OCR1A = 250 * sample_time - 1;          // 100ms -> ((16*10^6) / (frequency*prescaler)) - 1 (must be <65536)
   TCCR1B |= (1 << WGM12);                 // Turn on CTC mode
   TCCR1B |= (1 << CS11) | (1 << CS10);    // Set CS11 and CS10 bits for 64 prescaler
   TIMSK1 |= (1 << OCIE1A);                // Enable timer compare interrupt
@@ -103,6 +109,7 @@ void setup() {
 
   // ------ PIN CONFIGURATION ----------
   pinMode(RUN_PIN, OUTPUT);
+  digitalWrite(RUN_PIN, RUN_signal);
   pinMode(ALARM_PIN, INPUT_PULLUP); // If connected to drive, not necessary to use pullup
 
   // ---------- ALARM PIN INTERRUPT (TODO) ---------
@@ -117,6 +124,8 @@ void setup() {
   // --------- EXTERNAL VOLTAGE REFERENCE ----------
   analogReference(EXTERNAL);
 
+  // ---------- UPDATE SYSTEM INFO ----------
+  UpdateInfo(sample_time, RUN_signal);
 }
 
 
@@ -150,11 +159,11 @@ void loop() {
     interrupts();
 
     // Local variables to send data
-    unsigned long  aux = 0;
     const int capacity = JSON_OBJECT_SIZE(5);
     StaticJsonDocument<capacity> doc;
-    char buffer[200];
+    char buffer[80];
 
+    unsigned long  aux = 0;
     // Irradiance
     aux =  analog_0_copy * 1164L;
     aux = aux / 1023;
@@ -179,7 +188,6 @@ void loop() {
     client.publish(PUB_PARAM, buffer, false);  
 
   }
-
 }
 
 
@@ -238,4 +246,18 @@ void ConnectMQTT() {
       delay(5000);   // Wait 5 seconds before retrying
     }
   }
+}
+
+void UpdateInfo(int sample_time, bool run_signal) {
+  // Local variables to send data
+    const int capacity = JSON_OBJECT_SIZE(2);
+    StaticJsonDocument<capacity> doc;
+    char buffer[60];
+
+    doc["sample_time"] = (OCR1A+1)/250;
+    doc["run_signal"] = run_signal;
+
+       //Send data to MQTT
+    serializeJsonPretty(doc, buffer);
+    client.publish(PUB_INFO, buffer, true);  
 }
