@@ -1,5 +1,5 @@
-#include <Ethernet.h>      	// Ethernet communication
-#include <SPI.h>			      // SPI protocol (Ethernet shield)
+#include <Ethernet.h>       // Ethernet communication
+#include <SPI.h>            // SPI protocol (Ethernet shield)
 #include <PubSubClient.h>   // MQTT library
 #include <ArduinoJson.h>    // JSON library
 
@@ -83,7 +83,7 @@ void onReceiveMQTT(char* topic, byte* payload, unsigned int length) {
     interrupts();                           // Enable interrupts
   }
 
-  UpdateInfo(sample_time, RUN_signal, alarm_signal);                     // Update information in server
+  UpdateInfo(sample_time, RUN_signal, alarm_signal);  // Update information in server
 }
 
 
@@ -175,7 +175,7 @@ void loop() {
 
 // ---------- TIMER 1 INTERRUPT ----------
 ISR(TIMER1_COMPA_vect) {
-  // Flat interrupt to true
+  // Interrupt flag to true
   interrupt_flag_send = true;
 
   // Analog read
@@ -274,7 +274,7 @@ void UpdateInfo(int sample_time, bool run_signal, bool alarm_signal) {
     doc["run_signal"] = run_signal;
     doc["alarm"] = alarm_signal;
 
-       //Send data to MQTT
+       //Send data to MQTT (RETAIN FLAG TO TRUE)
     serializeJsonPretty(doc, buffer);
     client.publish(PUB_INFO, buffer, true);  
 }
