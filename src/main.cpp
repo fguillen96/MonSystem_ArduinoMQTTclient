@@ -37,9 +37,10 @@ PubSubClient client(ethClient);
 // ----- CONTROL VARIABLES -----
 int sample_time = 100;   
 bool RUN_signal = 0;
+bool alarm_signal = 0;
 
 // --------- INTERRUPTS VARIABLES ----------
-volatile bool alarm_flag = false;
+volatile bool interrupt_flag_alarm = false;
 volatile bool interrupt_flag_send = false;
 volatile int analog_0 = 0;
 volatile int analog_1 = 0; 
@@ -50,12 +51,13 @@ volatile int analog_4 = 0;
 
 
 // ********************************************************************
-//                     LOCAL FUNCTION PROTOTYPES
+//                     FUNCTION PROTOTYPES
 // ********************************************************************
 void ConnectEthernet();
 void ConnectMQTT();
-void UpdateInfo(int, bool);
-
+void UpdateInfo(int, bool, bool);
+void SendData(int,int, int, int, int);
+void alarm_interrupt();
 
 // ********************************************************************
 //                      CALLBACKS
@@ -65,10 +67,7 @@ void onReceiveMQTT(char* topic, byte* payload, unsigned int length) {
   // MQTT variables
   StaticJsonDocument<100> doc;
   deserializeJson(doc, payload, length);
-  JsonObject obj = doc.as<JsonObject>();
-
-  //Info variables
-  
+  JsonObject obj = doc.as<JsonObject>();  
 
   if (obj.containsKey("RUN")) {
     bool RUN = doc["RUN"];
@@ -84,7 +83,7 @@ void onReceiveMQTT(char* topic, byte* payload, unsigned int length) {
     interrupts();                           // Enable interrupts
   }
 
-  UpdateInfo(sample_time, RUN_signal);                     // Update information in server
+  UpdateInfo(sample_time, RUN_signal, alarm_signal);                     // Update information in server
 }
 
 
@@ -113,7 +112,7 @@ void setup() {
   pinMode(ALARM_PIN, INPUT_PULLUP); // If connected to drive, not necessary to use pullup
 
   // ---------- ALARM PIN INTERRUPT (TODO) ---------
-  //attachInterrupt(digitalPinToInterrupt(ALARM_PIN), alarm, CHANGE);
+  //attachInterrupt(digitalPinToInterrupt(ALARM_PIN), alarm_interrupt, CHANGE);
 
   // --------- ETHERNET AND MQTT CONFIGURATION ---------
   ConnectEthernet();
@@ -125,7 +124,7 @@ void setup() {
   analogReference(EXTERNAL);
 
   // ---------- UPDATE SYSTEM INFO ----------
-  UpdateInfo(sample_time, RUN_signal);
+  UpdateInfo(sample_time, RUN_signal, alarm_signal);
 }
 
 
@@ -158,43 +157,23 @@ void loop() {
     int analog_4_copy = analog_4;
     interrupts();
 
-    // Local variables to send data
-    const int capacity = JSON_OBJECT_SIZE(5);
-    StaticJsonDocument<capacity> doc;
-    char buffer[80];
+    SendData(analog_0_copy, analog_1_copy, analog_2_copy, analog_3_copy, analog_4_copy);
+  }
 
-    unsigned long  aux = 0;
-    // Irradiance
-    aux =  analog_0_copy * 1164L;
-    aux = aux / 1023;
-    doc["G"] = aux;
-
-    // Temperature
-    doc["T"] = roundf(analog_1_copy * 14.6627566 - 2000.0) / 100.0;
-
-    // Voltage
-    aux = analog_2_copy * 500L;
-    aux = aux / 1023;
-    doc["V"] = aux;
-
-    // Current
-    doc["I"] = roundf(analog_3_copy * 331.0 / 1023.0) / 100.0;
-
-    // Frequency
-    doc["f"] = roundf(analog_4_copy * 50000.0 / 1023.0) / 1000.0;
-
-    //Send data to MQTT
-    serializeJsonPretty(doc, buffer);
-    client.publish(PUB_PARAM, buffer, false);  
-
+  // ---------- SENDING ALARM ----------
+  if (interrupt_flag_alarm) {
+    interrupt_flag_alarm = false;
+    bool alarm = digitalRead(ALARM_PIN);
+    UpdateInfo(sample_time, RUN_signal, alarm);
   }
 }
 
 
 // ********************************************************************
-//                      TIMER1 INTERRUPT
+//                      INTERRUPTS
 // ********************************************************************
 
+// ---------- TIMER 1 INTERRUPT ----------
 ISR(TIMER1_COMPA_vect) {
   // Flat interrupt to true
   interrupt_flag_send = true;
@@ -206,6 +185,12 @@ ISR(TIMER1_COMPA_vect) {
   analog_3 = analogRead(A3);
   analog_4 = analogRead(A4);
 }
+
+// ---------- ALARM INTERRUPT ----------
+void alarm_interrupt() {
+  interrupt_flag_alarm = true;
+}
+
 
 
 // ********************************************************************
@@ -248,14 +233,46 @@ void ConnectMQTT() {
   }
 }
 
-void UpdateInfo(int sample_time, bool run_signal) {
+void SendData(int a0, int a1, int a2, int a3, int a4) {
   // Local variables to send data
-    const int capacity = JSON_OBJECT_SIZE(2);
+    const int capacity = JSON_OBJECT_SIZE(5);
+    StaticJsonDocument<capacity> doc;
+    char buffer[80];
+
+    unsigned long  aux = 0;
+    // Irradiance
+    aux =  a0 * 1164L;
+    aux = aux / 1023;
+    doc["G"] = aux;
+
+    // Temperature
+    doc["T"] = roundf(a1 * 14.6627566 - 2000.0) / 100.0;
+
+    // Voltage
+    aux = a2 * 500L;
+    aux = aux / 1023;
+    doc["V"] = aux;
+
+    // Current
+    doc["I"] = roundf(a3 * 331.0 / 1023.0) / 100.0;
+
+    // Frequency
+    doc["f"] = roundf(a4 * 50000.0 / 1023.0) / 1000.0;
+
+    //Send data to MQTT
+    serializeJsonPretty(doc, buffer);
+    client.publish(PUB_PARAM, buffer, false);  
+}
+
+void UpdateInfo(int sample_time, bool run_signal, bool alarm_signal) {
+  // Local variables to send data
+    const int capacity = JSON_OBJECT_SIZE(3);
     StaticJsonDocument<capacity> doc;
     char buffer[60];
 
     doc["sample_time"] = (OCR1A+1)/250;
     doc["run_signal"] = run_signal;
+    doc["alarm"] = alarm_signal;
 
        //Send data to MQTT
     serializeJsonPretty(doc, buffer);
