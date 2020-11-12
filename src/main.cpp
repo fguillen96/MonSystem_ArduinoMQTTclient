@@ -45,7 +45,6 @@
 
 
 
-
 // ********************************************************************
 //                     GLOBAL VARIABLES
 // ********************************************************************
@@ -67,14 +66,17 @@ volatile bool interrupt_flag_send = false;    // Flag to detect sample_time to s
 volatile int analog_reads[N_ANALOG];          // Array to store analog measurements
 
 
+
 // ********************************************************************
 //                     FUNCTION PROTOTYPES
 // ********************************************************************
 void ConnectEthernet();
 void ConnectMQTT();
-void UpdateInfo(int, bool, bool);
+void UpdateInfo();
 void SendData(int[N_ANALOG]);
 void alarm_interrupt();
+
+
 
 // ********************************************************************
 //                      CALLBACKS
@@ -100,7 +102,7 @@ void onReceiveMQTT(char* topic, byte* payload, unsigned int length) {
     interrupts();                           // Enable interrupts
   }
 
-  UpdateInfo(sample_time, RUN_signal, alarm_signal);  // Update information in server
+  UpdateInfo();  // Update information in server
 }
 
 
@@ -122,7 +124,6 @@ void setup() {
   TIMSK1 |= (1 << OCIE1A);                // Enable timer compare interrupt
   interrupts();                           // Allow interrupts
 
-
   // ------ PIN CONFIGURATION ----------
   pinMode(RUN_PIN, OUTPUT);
   digitalWrite(RUN_PIN, RUN_signal);
@@ -141,7 +142,7 @@ void setup() {
   analogReference(EXTERNAL);
 
   // ---------- UPDATE SYSTEM INFO ----------
-  UpdateInfo(sample_time, RUN_signal, alarm_signal);
+  UpdateInfo();
 }
 
 
@@ -173,17 +174,17 @@ void loop() {
     SendData(analog_reads_copy);
   }
 
-
   // ---------- SENDING ALARM ----------
   if (interrupt_flag_alarm) {
     interrupt_flag_alarm = false;
-    bool alarm = digitalRead(ALARM_PIN);
-    UpdateInfo(sample_time, RUN_signal, alarm);
+    alarm_signal = digitalRead(ALARM_PIN);
+    UpdateInfo();
   }
 
   // ---------- CLIENT LOOP ----------
   client.loop();
 }
+
 
 
 // ********************************************************************
@@ -228,6 +229,7 @@ void ConnectEthernet() {
   }
 }
 
+
 void ConnectMQTT() {
   // Loop until we're reconnected
   while (!client.connected()) {
@@ -247,6 +249,7 @@ void ConnectMQTT() {
     }
   }
 }
+
 
 void SendData(int analog_reads[N_ANALOG]) {
   // Local variables to send data
@@ -279,14 +282,15 @@ void SendData(int analog_reads[N_ANALOG]) {
     client.publish(PUB_PARAM, buffer, false);  
 }
 
-void UpdateInfo(int sample_time, bool run_signal, bool alarm_signal) {
+
+void UpdateInfo() {
   // Local variables to send data
     const int capacity = JSON_OBJECT_SIZE(3);
     StaticJsonDocument<capacity> doc;
     char buffer[80];
 
     doc["sample_time"] = int((OCR1A+1)/250);
-    doc["run_signal"] = run_signal;
+    doc["run_signal"] = RUN_signal;
     doc["alarm"] = alarm_signal;
 
        //Send data to MQTT (RETAIN FLAG TO TRUE)
