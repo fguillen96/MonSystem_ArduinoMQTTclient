@@ -1,7 +1,26 @@
+// *******************************************************************************************************
+// DESCRIPTION: MQTT client to send data from Arduino to Raspberry server. Added control and info topic
+// AUTOR: Fran Guillén
+// BOARD: Arduino UNO
+// ANALOG PINS:
+//    * Irradiance  -> A0
+//    * Temperature -> A1
+//    * Voltage     -> A2
+//    * Current     -> A3
+//    * Frequency   -> A4
+// *****************************************************************************************************
+
+
 #include <Ethernet.h>       // Ethernet communication
 #include <SPI.h>            // SPI protocol (Ethernet shield)
 #include <PubSubClient.h>   // MQTT library
 #include <ArduinoJson.h>    // JSON library
+
+
+// ---------- CONFIGURING IMPORTANT THINGS... ----------
+#define SAMPLE_TIME 100   // Sample time
+#define N_ANALOG    5     // Number of analog inputs
+
 
 // ---------- ETHERNET AND MQTT CONNECTION ----------
 #define ETHERNET_MAC        0xDE, 0xED, 0xBA, 0xFE, 0xFE, 0xED  // MAC
@@ -12,15 +31,18 @@
 #define MQTT_PASSWORD       "raspfran"                          // MQTT server password
 #define CLIENT_ID           "Arduino_LAB"                       // MQTT client ID
 
+
 // ---------- MQTT TOPICS ----------
 #define PUB_PARAM           "lab/param"
 #define PUB_ALARM           "lab/alarm"
 #define PUB_INFO            "lab/info"
 #define SUB_CONTROL         "lab/control"
 
+
 // ---------- INPUT/OUTPUT PIN ----------
 #define RUN_PIN 8     // Ethernet uses 10, 11, 12, 13. Can't use for general purpose
 #define ALARM_PIN 2   // 2 or 3. Arduino UNO interrupts 
+
 
 
 
@@ -35,19 +57,14 @@ PubSubClient client(ethClient);
 
 
 // ----- CONTROL VARIABLES -----
-int sample_time = 100;   
+int sample_time = SAMPLE_TIME;   
 bool RUN_signal = 0;
 bool alarm_signal = 0;
 
 // --------- INTERRUPTS VARIABLES ----------
-volatile bool interrupt_flag_alarm = false;
-volatile bool interrupt_flag_send = false;
-volatile int analog_0 = 0;
-volatile int analog_1 = 0; 
-volatile int analog_2 = 0;
-volatile int analog_3 = 0;
-volatile int analog_4 = 0;
-
+volatile bool interrupt_flag_alarm = false;   // Flag to detect alarm interrupt in loop
+volatile bool interrupt_flag_send = false;    // Flag to detect sample_time to send data in loop
+volatile int analog_reads[N_ANALOG];          // Array to store analog measurements
 
 
 // ********************************************************************
@@ -56,7 +73,7 @@ volatile int analog_4 = 0;
 void ConnectEthernet();
 void ConnectMQTT();
 void UpdateInfo(int, bool, bool);
-void SendData(int,int, int, int, int);
+void SendData(int[N_ANALOG]);
 void alarm_interrupt();
 
 // ********************************************************************
@@ -99,7 +116,7 @@ void setup() {
   TCCR1A = 0;                             // Set entire TCCR1A register to 0
   TCCR1B = 0;                             // Same for TCCR1B
   TCNT1  = 0;                             // Initialize counter value to 0
-  OCR1A = 250 * sample_time - 1;          // 100ms -> ((16*10^6) / (frequency*prescaler)) - 1 (must be <65536)
+  OCR1A = (250 * sample_time) - 1;        // 100ms -> ((16*10^6) / (frequency*prescaler)) - 1 (must be <65536)
   TCCR1B |= (1 << WGM12);                 // Turn on CTC mode
   TCCR1B |= (1 << CS11) | (1 << CS10);    // Set CS11 and CS10 bits for 64 prescaler
   TIMSK1 |= (1 << OCIE1A);                // Enable timer compare interrupt
@@ -133,14 +150,12 @@ void setup() {
 //                           LOOP
 // ********************************************************************
 void loop() {
-  // ----- COMPROBAR RED (MQTT LO GESTIONA TODO SOLO) -----
+  // ---------- IF DISCONNECTED, RECONNECT ----------
   if (!client.connected())
   {
     Serial.println("ERROR: Disconnected");
     ConnectMQTT();
   }
-
-  client.loop();
 
 
   // ---------- SENDING DATA TO MQTT SERVER ----------
@@ -149,16 +164,15 @@ void loop() {
     interrupt_flag_send = false;
 
     // Make a copy of variables (volatile only for 8 bits, be sure that value won't change)
+    int analog_reads_copy[N_ANALOG];
     noInterrupts();
-    int analog_0_copy = analog_0;
-    int analog_1_copy = analog_1;
-    int analog_2_copy = analog_2;
-    int analog_3_copy = analog_3;
-    int analog_4_copy = analog_4;
+    for (int i=0; i<N_ANALOG; i++) {
+      analog_reads_copy[i] = analog_reads[i]; // Inelegant, but works ...
+    }
     interrupts();
-
-    SendData(analog_0_copy, analog_1_copy, analog_2_copy, analog_3_copy, analog_4_copy);
+    SendData(analog_reads_copy);
   }
+
 
   // ---------- SENDING ALARM ----------
   if (interrupt_flag_alarm) {
@@ -166,6 +180,9 @@ void loop() {
     bool alarm = digitalRead(ALARM_PIN);
     UpdateInfo(sample_time, RUN_signal, alarm);
   }
+
+  // ---------- CLIENT LOOP ----------
+  client.loop();
 }
 
 
@@ -179,11 +196,9 @@ ISR(TIMER1_COMPA_vect) {
   interrupt_flag_send = true;
 
   // Analog read
-  analog_0 = analogRead(A0);
-  analog_1 = analogRead(A1);
-  analog_2 = analogRead(A2);
-  analog_3 = analogRead(A3);
-  analog_4 = analogRead(A4);
+  for (int i=0; i<N_ANALOG; i++) {
+    analog_reads[i] = analogRead(i);
+  }
 }
 
 // ---------- ALARM INTERRUPT ----------
@@ -233,31 +248,31 @@ void ConnectMQTT() {
   }
 }
 
-void SendData(int a0, int a1, int a2, int a3, int a4) {
+void SendData(int analog_reads[N_ANALOG]) {
   // Local variables to send data
-    const int capacity = JSON_OBJECT_SIZE(5);
+    const int capacity = JSON_OBJECT_SIZE(N_ANALOG);
     StaticJsonDocument<capacity> doc;
     char buffer[80];
 
     unsigned long  aux = 0;
     // Irradiance
-    aux =  a0 * 1164L;
+    aux =  analog_reads[0] * 1164L;
     aux = aux / 1023;
     doc["G"] = aux;
 
     // Temperature
-    doc["T"] = roundf(a1 * 14.6627566 - 2000.0) / 100.0;
+    doc["T"] = roundf(analog_reads[1] * 14.6627566 - 2000.0) / 100.0;
 
     // Voltage
-    aux = a2 * 500L;
+    aux = analog_reads[2] * 500L;
     aux = aux / 1023;
     doc["V"] = aux;
 
     // Current
-    doc["I"] = roundf(a3 * 331.0 / 1023.0) / 100.0;
+    doc["I"] = roundf(analog_reads[3] * 331.0 / 1023.0) / 100.0;
 
     // Frequency
-    doc["f"] = roundf(a4 * 50000.0 / 1023.0) / 1000.0;
+    doc["f"] = roundf(analog_reads[4] * 50000.0 / 1023.0) / 1000.0;
 
     //Send data to MQTT
     serializeJsonPretty(doc, buffer);
@@ -268,9 +283,9 @@ void UpdateInfo(int sample_time, bool run_signal, bool alarm_signal) {
   // Local variables to send data
     const int capacity = JSON_OBJECT_SIZE(3);
     StaticJsonDocument<capacity> doc;
-    char buffer[60];
+    char buffer[80];
 
-    doc["sample_time"] = (OCR1A+1)/250;
+    doc["sample_time"] = int((OCR1A+1)/250);
     doc["run_signal"] = run_signal;
     doc["alarm"] = alarm_signal;
 
