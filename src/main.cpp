@@ -54,9 +54,12 @@ IPAddress ip(ETHERNET_IP);
 EthernetClient ethClient;
 PubSubClient client(ethClient);
 
+// ---------- TIME CONTROL VARIABLES ---------
+unsigned long previous_time = 0;
+unsigned long timestamp = 0;
 
 // ----- CONTROL VARIABLES -----
-int sample_time = SAMPLE_TIME;   
+unsigned int sample_time = SAMPLE_TIME;   
 bool RUN_signal = 0;
 bool alarm_signal = 0;
 
@@ -64,6 +67,7 @@ bool alarm_signal = 0;
 volatile bool interrupt_flag_alarm = false;   // Flag to detect alarm interrupt in loop
 volatile bool interrupt_flag_send = false;    // Flag to detect sample_time to send data in loop
 volatile int analog_reads[N_ANALOG];          // Array to store analog measurements
+volatile unsigned long micros_value = 0;      // Time control variable in interrupt. It can be explained =(
 
 
 
@@ -73,7 +77,7 @@ volatile int analog_reads[N_ANALOG];          // Array to store analog measureme
 void ConnectEthernet();
 void ConnectMQTT();
 void UpdateInfo();
-void SendData(int[N_ANALOG]);
+void SendData(unsigned long timestamp, int[N_ANALOG]);
 void alarm_interrupt();
 
 
@@ -82,27 +86,44 @@ void alarm_interrupt();
 //                      CALLBACKS
 // ********************************************************************
 void onReceiveMQTT(char* topic, byte* payload, unsigned int length) {
-  // --------- LOCAL VARIABLES ----------
-  // MQTT variables
+  // --------- MQTT VARIABLES ----------
   StaticJsonDocument<100> doc;
   deserializeJson(doc, payload, length);
   JsonObject obj = doc.as<JsonObject>();  
 
+  // --------- RUN COMMAND ---------
   if (obj.containsKey("RUN")) {
     bool RUN = doc["RUN"];
     RUN_signal = RUN;
     digitalWrite(RUN_PIN, RUN_signal);   // Stop and start frequency drive
   }
 
+  // ---------- CHANGING SAMPLE TIME ---------
   if (obj.containsKey("sample_time")) {
-    // ---------- CHANGING SAMPLE TIME ---------
     sample_time = doc["sample_time"];       // Get sample time from JSON
     noInterrupts();                         // Deactivate interrupt
     OCR1A = 250 * sample_time - 1;          // Change register value: [(16*10^6) / (frequency*prescaler)] - 1 (must be <65536)
     interrupts();                           // Enable interrupts
   }
 
-  UpdateInfo();  // Update information in server
+  // ---------- ENABLE SENDING DATA OR NOT ----------
+  if (obj.containsKey("monitoring")) {
+    bool monitoring = doc["monitoring"];    // Get monitoring command from JSON
+    noInterrupts();                         // Deactivate interrupt
+    if (monitoring)
+      TIMSK1 |= (1 << OCIE1A);              //Activate or desactivate interrupt bit timer register
+    else
+      TIMSK1 &= (0 << OCIE1A);
+    interrupts();                           // Enable interrupts
+  }
+
+  // ---------- RESET TIMESTAMP ----------
+  if (obj.containsKey("timestamp")) {
+    timestamp = doc["timestamp"];
+  }
+
+
+  UpdateInfo();  // Update some info in server
 }
 
 
@@ -111,7 +132,7 @@ void onReceiveMQTT(char* topic, byte* payload, unsigned int length) {
 //                     BOARD SETUP
 // ********************************************************************
 void setup() {
-  Serial.begin(9600); // Enable serial monitor
+  Serial.begin(9600);  // Enable serial monitor
 
   // ---------- Timer1 interrupt configuration ----------
   noInterrupts();                         // Stop interrupts
@@ -127,7 +148,7 @@ void setup() {
   // ------ PIN CONFIGURATION ----------
   pinMode(RUN_PIN, OUTPUT);
   digitalWrite(RUN_PIN, RUN_signal);
-  pinMode(ALARM_PIN, INPUT_PULLUP); // If connected to drive, not necessary to use pullup
+  pinMode(ALARM_PIN, INPUT_PULLUP);  // If connected to drive, not necessary to use pullup
 
   // ---------- ALARM PIN INTERRUPT (TODO) ---------
   //attachInterrupt(digitalPinToInterrupt(ALARM_PIN), alarm_interrupt, CHANGE);
@@ -164,14 +185,23 @@ void loop() {
     // Deactivate interrupt flag
     interrupt_flag_send = false;
 
-    // Make a copy of variables (volatile only for 8 bits, be sure that value won't change)
+  // Make a copy of variables (volatile only for 8 bits, be sure that value won't change)
     int analog_reads_copy[N_ANALOG];
     noInterrupts();
+    unsigned long micros_value_copy = micros_value;
     for (int i=0; i<N_ANALOG; i++) {
       analog_reads_copy[i] = analog_reads[i]; // Inelegant, but works ...
     }
     interrupts();
-    SendData(analog_reads_copy);
+
+    // Calculate timestamp (IMPORTANT. This way works!)
+    unsigned long increment = (micros_value_copy - previous_time)/1000;
+    if (increment < sample_time) increment = sample_time;
+    timestamp = timestamp + increment;
+    previous_time = micros_value_copy;
+
+    // Send data
+    SendData(timestamp, analog_reads_copy);
   }
 
   // ---------- SENDING ALARM ----------
@@ -195,6 +225,9 @@ void loop() {
 ISR(TIMER1_COMPA_vect) {
   // Interrupt flag to true
   interrupt_flag_send = true;
+
+  // Get microseconds. In interrupt, it doesn't increment, but it is enough
+  micros_value = micros();
 
   // Analog read
   for (int i=0; i<N_ANALOG; i++) {
@@ -251,13 +284,16 @@ void ConnectMQTT() {
 }
 
 
-void SendData(int analog_reads[N_ANALOG]) {
+void SendData(unsigned long timestamp, int analog_reads[N_ANALOG]) {
   // Local variables to send data
-    const int capacity = JSON_OBJECT_SIZE(N_ANALOG);
+    const int capacity = JSON_OBJECT_SIZE(N_ANALOG + 1);
     StaticJsonDocument<capacity> doc;
-    char buffer[80];
-
+    char buffer[100];
     unsigned long  aux = 0;
+
+    // Timestamp
+    doc["t"] = timestamp;
+
     // Irradiance
     aux =  analog_reads[0] * 1164L;
     aux = aux / 1023;
@@ -284,7 +320,7 @@ void SendData(int analog_reads[N_ANALOG]) {
 
 
 void UpdateInfo() {
-  // Local variables to send data
+    // Local variables to send data
     const int capacity = JSON_OBJECT_SIZE(3);
     StaticJsonDocument<capacity> doc;
     char buffer[80];
@@ -293,7 +329,7 @@ void UpdateInfo() {
     doc["run_signal"] = RUN_signal;
     doc["alarm"] = alarm_signal;
 
-       //Send data to MQTT (RETAIN FLAG TO TRUE)
+    //Send data to MQTT (RETAIN FLAG TO TRUE)
     serializeJsonPretty(doc, buffer);
-    client.publish(PUB_INFO, buffer, true);  
+    client.publish(PUB_INFO, buffer, true);
 }
