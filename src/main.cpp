@@ -18,7 +18,7 @@
 
 
 // ---------- CONFIGURING IMPORTANT THINGS... ----------
-#define SAMPLE_TIME 100   // Sample time
+#define SAMPLE_TIME 100   // Sample time (MAX 25O ms)
 #define N_ANALOG    5     // Number of analog inputs
 
 
